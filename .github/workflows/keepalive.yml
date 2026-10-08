@@ -19,8 +19,11 @@ jobs:
         env:
           RENDER_URL: ${{ vars.RENDER_URL }}
         run: |
-          if [ -z "$RENDER_URL" ]; then
-            echo "RENDER_URL 변수가 아직 없습니다. 설정 후 동작합니다."
-            exit 0
+          # 복사·붙여넣기로 섞여 들어간 공백, 줄바꿈, 앞쪽 기호 등을 걸러내고 https://호스트 부분만 사용
+          BASE=$(printf '%s' "$RENDER_URL" | tr -d '\r\n\t ' | grep -oE 'https?://[A-Za-z0-9.-]+' | head -n1 || true)
+          if [ -z "$BASE" ]; then
+            echo "::error::RENDER_URL 변수가 비었거나 형식이 올바르지 않습니다. 예: https://lexguard-mcp-xxxx.onrender.com"
+            exit 1
           fi
-          curl -fsS --retry 3 --retry-delay 20 --max-time 90 "${RENDER_URL%/}/healthz"
+          echo "대상: $BASE/healthz"
+          curl -fsS --retry 3 --retry-delay 20 --retry-all-errors --max-time 90 "$BASE/healthz"
