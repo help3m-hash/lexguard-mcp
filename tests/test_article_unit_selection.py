@@ -162,3 +162,57 @@ async def test_get_single_article_picks_body_over_chapter_header():
     content = result.get("content") or ""
     assert "제4장" not in content, f"장 헤더가 본문 자리에 들어옴: {content!r}"
     assert "40시간" in content, f"50조 본문이 누락됨: {content!r}"
+
+
+# --- 항/호/목 번호 중복 방지 -------------------------------------------------
+
+from src.repositories.law_detail import LawDetailRepository as _LDR
+
+
+def test_hang_number_not_duplicated_when_content_has_it():
+    article = {
+        "조문제목": "개인정보의 파기",
+        "항": [
+            {"항번호": "①", "항내용": "① 개인정보처리자는 ... 파기하여야 한다."},
+            {"항번호": "②", "항내용": "② 복구 또는 재생되지 아니하도록 조치하여야 한다."},
+        ],
+    }
+    text = _LDR._render_article_text(article)
+    assert "① ①" not in text
+    assert "② ②" not in text
+    assert "① 개인정보처리자는" in text
+
+
+def test_hang_number_added_when_content_lacks_it():
+    text = _LDR._render_article_text(
+        {"항": [{"항번호": "①", "항내용": "개인정보처리자는 ..."}]}
+    )
+    assert text == "① 개인정보처리자는 ..."
+
+
+def test_ho_and_mok_numbers_not_duplicated():
+    article = {
+        "항": [
+            {
+                "항번호": "①",
+                "항내용": "① 다음 각 호의 방법으로 한다.",
+                "호": [
+                    {
+                        "호번호": "1.",
+                        "호내용": "1. 전자적 파일 형태인 경우",
+                        "목": [{"목번호": "가.", "목내용": "가. 영구 삭제"}],
+                    }
+                ],
+            }
+        ]
+    }
+    text = _LDR._render_article_text(article)
+    assert "1. 1." not in text
+    assert "가. 가." not in text
+
+
+def test_number_prefix_only_overlap_is_not_treated_as_same():
+    """번호 '1'과 내용 '10. ...'은 다른 번호이므로 번호를 붙여야 한다."""
+    assert _LDR._compose_numbered_text("1", "10. 기타") == "1 10. 기타"
+    # 목 번호 '가'와 본문 단어 '가족'도 구분한다.
+    assert _LDR._compose_numbered_text("가", "가족은") == "가 가족은"

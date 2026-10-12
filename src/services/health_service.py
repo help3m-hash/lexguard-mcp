@@ -6,16 +6,14 @@ import os
 import httpx
 
 from src.repositories.base import (
+    AUTH_FAILURE_GUIDE,
     BaseLawRepository,
     LAW_API_BASE_URL,
     DRF_REQUEST_TIMEOUT_SEC,
 )
 from src.utils.http_client import aget
 
-_IP_REGISTRATION_GUIDE = (
-    "open.law.go.kr [OPEN API > API인증키관리]에서 현재 서버(PC)의 IP가 "
-    "등록되어 있는지 확인하세요. 유동 IP 회선은 IP 변경 시 재등록이 필요합니다."
-)
+_IP_REGISTRATION_GUIDE = AUTH_FAILURE_GUIDE
 
 
 class HealthService:
@@ -70,17 +68,6 @@ class HealthService:
                 if invalid.get("error_code") in ("API_ERROR_AUTH", "API_ERROR_HTML")
                 else invalid.get("recovery_guide"),
             }
-        # 미등록 IP/잘못된 키는 HTTP 200 + application/json 본문
-        # {"result": "사용자 정보 검증에 실패하였습니다.", ...}으로 오므로
-        # validate_drf_response()로는 잡히지 않는다 — 본문 마커로 감지한다.
-        if "사용자 정보 검증" in (response.text or ""):
-            return {
-                "checked": True,
-                "status": "failed",
-                "error_code": "API_ERROR_AUTH",
-                "message": "사용자 정보 검증에 실패했습니다 (미등록 IP 또는 잘못된 API 키).",
-                "guide": _IP_REGISTRATION_GUIDE,
-            }
         return {
             "checked": True,
             "status": "ok",
@@ -94,20 +81,34 @@ class HealthService:
         deep=True이면 실제 DRF API를 1회 호출해 키 인증·IP 등록까지 검증한다.
         (/health 인프라 프로브는 deep=False, MCP health 도구는 deep=True)
         """
-        api_key = os.environ.get("LAW_API_KEY", "")
-
+        key_var = None
+        raw_key = ""
+        for name in ("LAW_API_KEY", "LAWGOKR_OC"):
+            if os.environ.get(name):
+                key_var, raw_key = name, os.environ[name]
+                break
+        # 실제 요청에 쓰이는 값과 같게 보이도록 get_api_key()와 동일하게 strip한다.
+        api_key = raw_key.strip()
         has_api_key = bool(api_key)
-        api_key_length = len(api_key) if api_key else 0
+        api_key_length = len(api_key)
         api_key_preview = BaseLawRepository.mask_api_key(api_key) if has_api_key else ""
+        has_whitespace = has_api_key and raw_key != api_key
 
         env_file_exists = os.path.exists(".env")
+        if not has_api_key:
+            key_source = "설정되지 않음"
+        elif env_file_exists:
+            key_source = f"환경변수 {key_var} (.env 파일이 있어 그 값일 수 있음)"
+        else:
+            key_source = f"환경변수 {key_var} (호스팅 환경변수 설정)"
 
         env_vars_status = {
             "LAW_API_KEY": {
                 "exists": "LAW_API_KEY" in os.environ,
-                "has_value": has_api_key,
-                "length": api_key_length,
-                "preview": api_key_preview if has_api_key else None
+                "has_value": bool(os.environ.get("LAW_API_KEY", "").strip()),
+                "length": len(os.environ.get("LAW_API_KEY", "").strip()),
+                "preview": BaseLawRepository.mask_api_key(os.environ.get("LAW_API_KEY", ""))
+                or None,
             },
             "LOG_LEVEL": {
                 "exists": "LOG_LEVEL" in os.environ,
@@ -119,21 +120,25 @@ class HealthService:
             }
         }
 
-        # API 준비 상태 확인
-        api_ready = has_api_key  # API 키가 있으면 준비됨
+        api_ready = has_api_key
+        law_api_key_info = {
+            "configured": has_api_key,
+            "length": api_key_length,
+            "preview": api_key_preview if has_api_key else None,
+            "source": key_source,
+            "usage": "국가법령정보센터 API의 OC 파라미터로 사용됩니다.",
+        }
+        if has_whitespace:
+            law_api_key_info["warning"] = (
+                "키 값 앞뒤에 공백이 있습니다. 요청 시 제거되지만 환경변수 값을 정리하세요."
+            )
 
         # Health Check는 항상 HTTP 200을 반환해야 함 (인프라 프로브가 서버
         # 생존 여부만 판단하도록; 상세 상태는 본문 status 필드로 전달)
         result = {
             "status": "ok" if api_ready else "warning",
             "environment": {
-                "law_api_key": {
-                    "configured": has_api_key,
-                    "length": api_key_length,
-                    "preview": api_key_preview if has_api_key else None,
-                    "source": ".env 파일에서 로드됨" if has_api_key else "설정되지 않음 (선택사항)",
-                    "usage": "국가법령정보센터 API의 OC 파라미터로 사용됩니다."
-                },
+                "law_api_key": law_api_key_info,
                 "env_file": {
                     "exists": env_file_exists,
                     "path": ".env",
@@ -142,10 +147,14 @@ class HealthService:
                 "env_vars": env_vars_status,
                 "api_ready": api_ready,
                 "api_status": "ready" if api_ready else "not_ready",
-                "api_status_message": "API 키가 설정되어 있어 검색 기능을 사용할 수 있습니다." if api_ready else "API 키가 설정되지 않아 일부 검색 기능이 제한될 수 있습니다."
+                "api_status_message": (
+                    "API 키가 설정되어 있습니다. 실제 연결 여부는 api_connection을 확인하세요."
+                    if api_ready
+                    else "API 키가 설정되지 않아 법령 조회를 할 수 없습니다."
+                ),
             },
             "message": "한국 법령 MCP 서버가 정상적으로 실행 중입니다." if api_ready else "서버는 실행 중이지만 API 키가 설정되지 않았습니다.",
-            "note": "LAW_API_KEY가 설정되어 있으면 모든 API 요청의 OC 파라미터에 자동으로 포함됩니다." if api_ready else "LAW_API_KEY를 설정하면 더 많은 검색 기능을 사용할 수 있습니다.",
+            "note": "LAW_API_KEY가 설정되어 있으면 모든 API 요청의 OC 파라미터에 자동으로 포함됩니다." if api_ready else "LAW_API_KEY를 설정해야 법령 조회 기능을 사용할 수 있습니다.",
             "server": "active"
         }
 
@@ -153,6 +162,13 @@ class HealthService:
             connection = await HealthService._check_api_connection()
             result["api_connection"] = connection
             if connection["status"] != "ok":
+                env = result["environment"]
+                env["api_ready"] = False
+                env["api_status"] = "connection_failed"
+                env["api_status_message"] = (
+                    "키는 설정되어 있지만 국가법령정보센터 API 호출이 실패합니다. "
+                    "api_connection.guide를 확인하세요."
+                )
                 result["status"] = "warning"
                 result["message"] = (
                     "서버는 실행 중이지만 국가법령정보센터 API 연결 확인에 실패했습니다."

@@ -63,15 +63,40 @@ class LawDetailRepository(BaseLawRepository):
 
     @staticmethod
     def _compose_numbered_text(number: Any, content: Any) -> str:
-        """번호와 내용을 사람이 읽기 쉬운 한 줄로 합칩니다."""
-        parts = []
-        for part in (number, content):
-            if part is None:
-                continue
-            text = str(part).strip()
-            if text:
-                parts.append(text)
-        return " ".join(parts).strip()
+        """번호와 내용을 사람이 읽기 쉬운 한 줄로 합칩니다.
+
+        DRF는 항내용·호내용·목내용 앞에 번호(①, 1., 가.)를 이미 붙여 주는 경우가
+        많다. 그때 번호를 다시 붙이면 "① ① ..."처럼 중복되므로 생략한다.
+        """
+        number_text = str(number).strip() if number is not None else ""
+        content_text = str(content).strip() if content is not None else ""
+        if not content_text:
+            return number_text
+        if not number_text:
+            return content_text
+        if LawDetailRepository._content_starts_with_number(content_text, number_text):
+            return content_text
+        return f"{number_text} {content_text}"
+
+    @staticmethod
+    def _content_starts_with_number(content: str, number: str) -> bool:
+        """내용이 같은 번호로 시작하는지 판별합니다 (예: 번호 '1'·'1.' / 내용 '1. ...').
+
+        '1'과 '10. ...'처럼 접두만 겹치는 경우는 같은 번호로 보지 않는다.
+        """
+        core = number.rstrip(".").strip()
+        if not core or not content.startswith(core):
+            return False
+        rest = content[len(core):]
+        if not rest:
+            return True
+        # 숫자 번호 뒤에 숫자가 이어지면 다른 번호(10, 11 …)다.
+        if core[-1].isdigit() and rest[0].isdigit():
+            return False
+        # 목 번호(가) 뒤에 한글이 붙어 이어지면 번호가 아니라 본문 단어다.
+        if "가" <= core[-1] <= "힣" and "가" <= rest[0] <= "힣":
+            return False
+        return True
 
     @classmethod
     def _render_mok_text(cls, mok_item: dict[str, Any]) -> str:
