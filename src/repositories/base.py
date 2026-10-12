@@ -83,6 +83,15 @@ LAW_API_SEARCH_URL = _build_drf_url("lawSearch.do")  # 법령 검색용
 DRF_REQUEST_TIMEOUT_SEC = 10
 DRF_REQUEST_TIMEOUT_LONG_SEC = 30
 
+# DRF 인증 실패 안내문 표지 (미등록 IP·잘못된 OC 공통)
+_AUTH_FAILURE_MARKER = "사용자 정보 검증에 실패"
+_AUTH_FAILURE_MAX_BODY = 2000
+AUTH_FAILURE_GUIDE = (
+    "open.law.go.kr [OPEN API > API인증키관리]에서 (1) 서버의 아웃바운드 IP가 "
+    "등록되어 있는지, (2) 서버의 LAW_API_KEY 값이 등록된 OC와 정확히 같은지 "
+    "확인하세요. 유동 IP·클라우드 호스팅은 IP가 바뀌면 재등록이 필요합니다."
+)
+
 
 class BaseLawRepository:
     """법령 Repository의 기본 클래스 - 공통 유틸리티 메서드"""
@@ -190,6 +199,20 @@ class BaseLawRepository:
         head = body.lstrip()[:1000].lower()
         return head.startswith("<!doctype html") or "<html" in head
 
+    @staticmethod
+    def is_auth_failure_body(body: str) -> bool:
+        """DRF의 인증 실패 안내문인지 판별합니다.
+
+        정상 본문(판례·조문 등)에 같은 문구가 우연히 들어 있는 경우를 피하려고
+        짧은 응답에서만 표지 문구를 찾는다.
+        """
+        if not body:
+            return False
+        stripped = body.strip()
+        if len(stripped) > _AUTH_FAILURE_MAX_BODY:
+            return False
+        return _AUTH_FAILURE_MARKER in stripped
+
     @classmethod
     def validate_drf_response(cls, response) -> Optional[dict]:
         """DRF 응답의 Content-Type/HTML 여부를 검증합니다."""
@@ -218,6 +241,27 @@ class BaseLawRepository:
                 "missing_reason": "API_ERROR_AUTH",
                 "error": "API 키 인증에 실패했습니다.",
                 "recovery_guide": "환경변수 LAW_API_KEY 또는 LAWGOKR_OC에 발급키를 설정하세요.",
+                "api_url": sanitized_url,
+                "status": status_code,
+                "content_type": content_type,
+                "short_snippet": short_snippet,
+            }
+
+        # 미등록 IP·잘못된 OC는 HTTP 200 + JSON/XML/HTML 본문의 짧은 안내문으로 온다.
+        # 이를 놓치면 각 도구가 "법령 ID 없음"·"결과 0건" 같은 엉뚱한 메시지를 내므로
+        # 콘텐츠 형식과 무관하게 여기서 인증 오류로 통일한다.
+        if cls.is_auth_failure_body(body):
+            logger.warning(
+                "DRF response auth failure | url=%s status=%s ct=%s",
+                sanitized_url,
+                status_code,
+                content_type,
+            )
+            return {
+                "error_code": "API_ERROR_AUTH",
+                "missing_reason": "API_ERROR_AUTH",
+                "error": "사용자 정보 검증에 실패했습니다 (미등록 IP 또는 잘못된 API 키).",
+                "recovery_guide": AUTH_FAILURE_GUIDE,
                 "api_url": sanitized_url,
                 "status": status_code,
                 "content_type": content_type,

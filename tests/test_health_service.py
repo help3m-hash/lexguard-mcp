@@ -92,7 +92,8 @@ async def test_health_deep_unregistered_ip_html(monkeypatch):
     out = await HealthService.check_health(deep=True)
     conn = out["api_connection"]
     assert conn["status"] == "failed"
-    assert conn["error_code"] == "API_ERROR_HTML"
+    # HTML 안내 페이지라도 인증 실패 문구가 있으면 인증 오류로 분류한다.
+    assert conn["error_code"] == "API_ERROR_AUTH"
     assert "IP" in conn["guide"]
     assert out["status"] == "warning"
 
@@ -124,3 +125,51 @@ async def test_health_deep_without_key(monkeypatch):
     conn = out["api_connection"]
     assert conn["status"] == "failed"
     assert conn["error_code"] == "API_ERROR_AUTH"
+
+
+@pytest.mark.asyncio
+async def test_health_deep_failure_marks_api_not_ready(monkeypatch):
+    """연결 실패 시 api_ready가 True로 남아 '사용 가능'처럼 보이면 안 된다."""
+    monkeypatch.setenv("LAW_API_KEY", "realkey1234")
+
+    async def fake_aget(url, params=None, timeout=None):
+        return _FakeResponse('{"result": "사용자 정보 검증에 실패하였습니다."}')
+
+    monkeypatch.setattr(health_module, "aget", fake_aget)
+    out = await HealthService.check_health(deep=True)
+    env = out["environment"]
+    assert env["api_ready"] is False
+    assert env["api_status"] == "connection_failed"
+
+
+@pytest.mark.asyncio
+async def test_health_key_source_without_env_file(monkeypatch, tmp_path):
+    """.env 파일이 없으면 출처를 '.env 파일'로 표시하지 않는다."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("LAW_API_KEY", "realkey1234")
+    out = await HealthService.check_health()
+    source = out["environment"]["law_api_key"]["source"]
+    assert ".env 파일에서 로드됨" not in source
+    assert "호스팅 환경변수" in source
+
+
+@pytest.mark.asyncio
+async def test_health_reports_stripped_key_and_whitespace_warning(monkeypatch):
+    """미리보기·길이는 실제 전송되는 값(strip)을 기준으로 하고 공백은 경고한다."""
+    monkeypatch.setenv("LAW_API_KEY", " realkey12345 ")
+    out = await HealthService.check_health()
+    info = out["environment"]["law_api_key"]
+    assert info["length"] == 12
+    assert info["preview"] == "real****2345"
+    assert "warning" in info
+
+
+@pytest.mark.asyncio
+async def test_health_uses_lawgokr_oc_fallback(monkeypatch):
+    """요청 경로(get_api_key)와 같이 LAWGOKR_OC도 키로 인정한다."""
+    monkeypatch.delenv("LAW_API_KEY", raising=False)
+    monkeypatch.setenv("LAWGOKR_OC", "fallbackkey1")
+    out = await HealthService.check_health()
+    info = out["environment"]["law_api_key"]
+    assert info["configured"] is True
+    assert "LAWGOKR_OC" in info["source"]
